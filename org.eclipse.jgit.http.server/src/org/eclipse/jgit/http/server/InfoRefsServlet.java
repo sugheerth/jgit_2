@@ -56,8 +56,6 @@ import javax.servlet.http.HttpServletResponse;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
-import org.eclipse.jgit.revwalk.RevFlag;
-import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.transport.RefAdvertiser;
 import org.eclipse.jgit.util.HttpSupport;
 
@@ -73,9 +71,6 @@ class InfoRefsServlet extends HttpServlet {
 		rsp.setCharacterEncoding(Constants.CHARACTER_ENCODING);
 
 		final Repository db = getRepository(req);
-		final RevWalk walk = new RevWalk(db);
-		final RevFlag ADVERTISED = walk.newFlag("ADVERTISED");
-
 		final OutputStreamWriter out = new OutputStreamWriter(
 				new SmartOutputStream(req, rsp), Constants.CHARSET);
 		final RefAdvertiser adv = new RefAdvertiser() {
@@ -92,7 +87,7 @@ class InfoRefsServlet extends HttpServlet {
 				// No end marker required for info/refs format.
 			}
 		};
-		adv.init(walk, ADVERTISED);
+		adv.init(db);
 		adv.setDerefTags(true);
 
 		Map<String, Ref> refs = db.getAllRefs();

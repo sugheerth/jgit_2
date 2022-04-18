@@ -167,7 +167,27 @@ public abstract class RefUpdate {
 
 	private final Ref ref;
 
-	RefUpdate(final Ref ref) {
+	/**
+	 * Is this RefUpdate detaching a symbolic ref?
+	 *
+	 * We need this info since this.ref will normally be peeled of in case of
+	 * detaching a symbolic ref (HEAD for example).
+	 *
+	 * Without this flag we cannot decide whether the ref has to be updated or
+	 * not in case when it was a symbolic ref and the newValue == oldValue.
+	 */
+	private boolean detachingSymbolicRef;
+
+	/**
+	 * Construct a new update operation for the reference.
+	 * <p>
+	 * {@code ref.getObjectId()} will be used to seed {@link #getOldObjectId()},
+	 * which callers can use as part of their own update logic.
+	 *
+	 * @param ref
+	 *            the reference that will be updated by this operation.
+	 */
+	protected RefUpdate(final Ref ref) {
 		this.ref = ref;
 		oldValue = ref.getObjectId();
 		refLogMessage = "";
@@ -242,6 +262,13 @@ public abstract class RefUpdate {
 	 */
 	public ObjectId getNewObjectId() {
 		return newValue;
+	}
+
+	/**
+	 * Tells this RefUpdate that it is actually detaching a symbolic ref.
+	 */
+	public void setDetachingSymbolicRef() {
+		detachingSymbolicRef = true;
 	}
 
 	/**
@@ -431,7 +458,12 @@ public abstract class RefUpdate {
 	 *             an unexpected IO error occurred while writing changes.
 	 */
 	public Result update() throws IOException {
-		return update(new RevWalk(getRepository()));
+		RevWalk rw = new RevWalk(getRepository());
+		try {
+			return update(rw);
+		} finally {
+			rw.release();
+		}
 	}
 
 	/**
@@ -476,7 +508,12 @@ public abstract class RefUpdate {
 	 * @throws IOException
 	 */
 	public Result delete() throws IOException {
-		return delete(new RevWalk(getRepository()));
+		RevWalk rw = new RevWalk(getRepository());
+		try {
+			return delete(rw);
+		} finally {
+			rw.release();
+		}
 	}
 
 	/**
@@ -577,7 +614,7 @@ public abstract class RefUpdate {
 
 			newObj = safeParse(walk, newValue);
 			oldObj = safeParse(walk, oldValue);
-			if (newObj == oldObj)
+			if (newObj == oldObj && !detachingSymbolicRef)
 				return store.execute(Result.NO_CHANGE);
 
 			if (newObj instanceof RevCommit && oldObj instanceof RevCommit) {

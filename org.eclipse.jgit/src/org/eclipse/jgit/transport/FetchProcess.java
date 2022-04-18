@@ -63,14 +63,14 @@ import org.eclipse.jgit.errors.MissingObjectException;
 import org.eclipse.jgit.errors.NotSupportedException;
 import org.eclipse.jgit.errors.TransportException;
 import org.eclipse.jgit.lib.Constants;
-import org.eclipse.jgit.lib.LockFile;
 import org.eclipse.jgit.lib.ObjectId;
-import org.eclipse.jgit.lib.PackLock;
 import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.ObjectWalk;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.storage.file.LockFile;
+import org.eclipse.jgit.storage.file.PackLock;
 
 class FetchProcess {
 	/** Transport we will fetch over. */
@@ -110,8 +110,12 @@ class FetchProcess {
 		try {
 			executeImp(monitor, result);
 		} finally {
+			try {
 			for (final PackLock lock : packLocks)
 				lock.unlock();
+			} catch (IOException e) {
+				throw new TransportException(e.getMessage(), e);
+			}
 		}
 	}
 
@@ -160,8 +164,10 @@ class FetchProcess {
 				have.addAll(askFor.keySet());
 				askFor.clear();
 				for (final Ref r : additionalTags) {
-					final ObjectId id = r.getPeeledObjectId();
-					if (id == null || transport.local.hasObject(id))
+					ObjectId id = r.getPeeledObjectId();
+					if (id == null)
+						id = r.getObjectId();
+					if (transport.local.hasObject(id))
 						wantTag(r);
 				}
 
@@ -176,16 +182,21 @@ class FetchProcess {
 		}
 
 		final RevWalk walk = new RevWalk(transport.local);
-		if (transport.isRemoveDeletedRefs())
-			deleteStaleTrackingRefs(result, walk);
-		for (TrackingRefUpdate u : localUpdates) {
-			try {
-				u.update(walk);
-				result.add(u);
-			} catch (IOException err) {
-				throw new TransportException(MessageFormat.format(
-						JGitText.get().failureUpdatingTrackingRef, u.getLocalName(), err.getMessage()), err);
+		try {
+			if (transport.isRemoveDeletedRefs())
+				deleteStaleTrackingRefs(result, walk);
+			for (TrackingRefUpdate u : localUpdates) {
+				try {
+					u.update(walk);
+					result.add(u);
+				} catch (IOException err) {
+					throw new TransportException(MessageFormat.format(JGitText
+							.get().failureUpdatingTrackingRef,
+							u.getLocalName(), err.getMessage()), err);
+				}
 			}
+		} finally {
+			walk.release();
 		}
 
 		if (!fetchHeadUpdates.isEmpty()) {
@@ -271,8 +282,11 @@ class FetchProcess {
 	}
 
 	private void updateFETCH_HEAD(final FetchResult result) throws IOException {
-		final LockFile lock = new LockFile(new File(transport.local
-				.getDirectory(), "FETCH_HEAD"));
+		File meta = transport.local.getDirectory();
+		if (meta == null)
+			return;
+		final LockFile lock = new LockFile(new File(meta, "FETCH_HEAD"),
+				transport.local.getFS());
 		try {
 			if (lock.lock()) {
 				final Writer w = new OutputStreamWriter(lock.getOutputStream());
@@ -294,11 +308,15 @@ class FetchProcess {
 	private boolean askForIsComplete() throws TransportException {
 		try {
 			final ObjectWalk ow = new ObjectWalk(transport.local);
-			for (final ObjectId want : askFor.keySet())
-				ow.markStart(ow.parseAny(want));
-			for (final Ref ref : transport.local.getAllRefs().values())
-				ow.markUninteresting(ow.parseAny(ref.getObjectId()));
-			ow.checkConnectivity();
+			try {
+				for (final ObjectId want : askFor.keySet())
+					ow.markStart(ow.parseAny(want));
+				for (final Ref ref : transport.local.getAllRefs().values())
+					ow.markUninteresting(ow.parseAny(ref.getObjectId()));
+				ow.checkConnectivity();
+			} finally {
+				ow.release();
+			}
 			return true;
 		} catch (MissingObjectException e) {
 			return false;
@@ -331,14 +349,22 @@ class FetchProcess {
 		for (final Ref r : conn.getRefs()) {
 			if (!isTag(r))
 				continue;
+
+			Ref local = haveRefs.get(r.getName());
+			ObjectId obj = r.getObjectId();
+
 			if (r.getPeeledObjectId() == null) {
-				additionalTags.add(r);
+				if (local != null && obj.equals(local.getObjectId()))
+					continue;
+				if (askFor.containsKey(obj) || transport.local.hasObject(obj))
+					wantTag(r);
+				else
+					additionalTags.add(r);
 				continue;
 			}
 
-			final Ref local = haveRefs.get(r.getName());
 			if (local != null) {
-				if (!r.getObjectId().equals(local.getObjectId()))
+				if (!obj.equals(local.getObjectId()))
 					wantTag(r);
 			} else if (askFor.containsKey(r.getPeeledObjectId())
 					|| transport.local.hasObject(r.getPeeledObjectId()))

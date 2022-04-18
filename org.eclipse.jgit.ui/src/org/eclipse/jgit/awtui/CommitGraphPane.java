@@ -176,7 +176,7 @@ public class CommitGraphPane extends JTable {
 		}
 	}
 
-	class NameCellRender extends DefaultTableCellRenderer {
+	static class NameCellRender extends DefaultTableCellRenderer {
 		private static final long serialVersionUID = 1L;
 
 		public Component getTableCellRendererComponent(final JTable table,
@@ -194,7 +194,7 @@ public class CommitGraphPane extends JTable {
 		}
 	}
 
-	class DateCellRender extends DefaultTableCellRenderer {
+	static class DateCellRender extends DefaultTableCellRenderer {
 		private static final long serialVersionUID = 1L;
 
 		private final DateFormat fmt = new SimpleDateFormat(
@@ -215,13 +215,14 @@ public class CommitGraphPane extends JTable {
 		}
 	}
 
-	class GraphCellRender extends DefaultTableCellRenderer {
+	static class GraphCellRender extends DefaultTableCellRenderer {
 		private static final long serialVersionUID = 1L;
 
 		private final AWTPlotRenderer renderer = new AWTPlotRenderer(this);
 
 		PlotCommit<SwingLane> commit;
 
+		@SuppressWarnings("unchecked")
 		public Component getTableCellRendererComponent(final JTable table,
 				final Object value, final boolean isSelected,
 				final boolean hasFocus, final int row, final int column) {

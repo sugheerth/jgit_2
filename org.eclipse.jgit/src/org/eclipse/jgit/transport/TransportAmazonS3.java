@@ -53,9 +53,12 @@ import java.net.URLConnection;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.TreeMap;
 
 import org.eclipse.jgit.JGitText;
@@ -66,10 +69,9 @@ import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectIdRef;
 import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Ref;
+import org.eclipse.jgit.lib.Ref.Storage;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.SymbolicRef;
-import org.eclipse.jgit.lib.Ref.Storage;
-import org.eclipse.jgit.util.FS;
 
 /**
  * Transport over the non-Git aware Amazon S3 protocol.
@@ -98,11 +100,29 @@ import org.eclipse.jgit.util.FS;
 public class TransportAmazonS3 extends HttpTransport implements WalkTransport {
 	static final String S3_SCHEME = "amazon-s3";
 
-	static boolean canHandle(final URIish uri) {
-		if (!uri.isRemote())
-			return false;
-		return S3_SCHEME.equals(uri.getScheme());
-	}
+	static final TransportProtocol PROTO_S3 = new TransportProtocol() {
+		public String getName() {
+			return "Amazon S3";
+		}
+
+		public Set<String> getSchemes() {
+			return Collections.singleton(S3_SCHEME);
+		}
+
+		public Set<URIishField> getRequiredFields() {
+			return Collections.unmodifiableSet(EnumSet.of(URIishField.USER,
+					URIishField.HOST, URIishField.PATH));
+		}
+
+		public Set<URIishField> getOptionalFields() {
+			return Collections.unmodifiableSet(EnumSet.of(URIishField.PASS));
+		}
+
+		public Transport open(URIish uri, Repository local, String remoteName)
+				throws NotSupportedException {
+			return new TransportAmazonS3(local, uri);
+		}
+	};
 
 	/** User information necessary to connect to S3. */
 	private final AmazonS3 s3;
@@ -127,23 +147,7 @@ public class TransportAmazonS3 extends HttpTransport implements WalkTransport {
 			throws NotSupportedException {
 		super(local, uri);
 
-		Properties props = null;
-		File propsFile = new File(local.getDirectory(), uri.getUser());
-		if (!propsFile.isFile())
-			propsFile = new File(FS.userHome(), uri.getUser());
-		if (propsFile.isFile()) {
-			try {
-				props = AmazonS3.properties(propsFile);
-			} catch (IOException e) {
-				throw new NotSupportedException(MessageFormat.format(JGitText.get().cannotReadFile, propsFile), e);
-			}
-		} else {
-			props = new Properties();
-			props.setProperty("accesskey", uri.getUser());
-			props.setProperty("secretkey", uri.getPass());
-		}
-
-		s3 = new AmazonS3(props);
+		s3 = new AmazonS3(loadProperties());
 		bucket = uri.getHost();
 
 		String p = uri.getPath();
@@ -152,6 +156,33 @@ public class TransportAmazonS3 extends HttpTransport implements WalkTransport {
 		if (p.endsWith("/"))
 			p = p.substring(0, p.length() - 1);
 		keyPrefix = p;
+	}
+
+	private Properties loadProperties() throws NotSupportedException {
+		if (local.getDirectory() != null) {
+			File propsFile = new File(local.getDirectory(), uri.getUser());
+			if (propsFile.isFile())
+				return loadPropertiesFile(propsFile);
+		}
+
+		File propsFile = new File(local.getFS().userHome(), uri.getUser());
+		if (propsFile.isFile())
+			return loadPropertiesFile(propsFile);
+
+		Properties props = new Properties();
+		props.setProperty("accesskey", uri.getUser());
+		props.setProperty("secretkey", uri.getPass());
+		return props;
+	}
+
+	private static Properties loadPropertiesFile(File propsFile)
+			throws NotSupportedException {
+		try {
+			return AmazonS3.properties(propsFile);
+		} catch (IOException e) {
+			throw new NotSupportedException(MessageFormat.format(
+					JGitText.get().cannotReadFile, propsFile), e);
+		}
 	}
 
 	@Override

@@ -51,23 +51,15 @@ import org.eclipse.jgit.util.RawParseUtils;
 
 /**
  * This class represents an entry in a tree, like a blob or another tree.
+ *
+ * @deprecated To look up information about a single path, use
+ * {@link org.eclipse.jgit.treewalk.TreeWalk#forPath(Repository, String, org.eclipse.jgit.revwalk.RevTree)}.
+ * To lookup information about multiple paths at once, use a
+ * {@link org.eclipse.jgit.treewalk.TreeWalk} and obtain the current entry's
+ * information from its getter methods.
  */
+@Deprecated
 public abstract class TreeEntry implements Comparable {
-	/**
-	 * a flag for {@link TreeEntry#accept(TreeVisitor, int)} to visit only modified entries
-	 */
-	public static final int MODIFIED_ONLY = 1 << 0;
-
-	/**
-	 * a flag for {@link TreeEntry#accept(TreeVisitor, int)} to visit only loaded entries
-	 */
-	public static final int LOADED_ONLY = 1 << 1;
-
-	/**
-	 * a flag for {@link TreeEntry#accept(TreeVisitor, int)} obsolete?
-	 */
-	public static final int CONCURRENT_MODIFICATION = 1 << 2;
-
 	private byte[] nameUTF8;
 
 	private Tree parent;
@@ -256,29 +248,6 @@ public abstract class TreeEntry implements Comparable {
 		// which we do not support yet.
 		return FileMode.TREE.equals(i.getModeBits()) ? '/' : '\0';
 	}
-
-	/**
-	 * See @{link {@link #accept(TreeVisitor, int)}.
-	 *
-	 * @param tv
-	 * @throws IOException
-	 */
-	public void accept(final TreeVisitor tv) throws IOException {
-		accept(tv, 0);
-	}
-
-	/**
-	 * Visit the members of this TreeEntry.
-	 *
-	 * @param tv
-	 *            A visitor object doing the work
-	 * @param flags
-	 *            Specification for what members to visit. See
-	 *            {@link #MODIFIED_ONLY}, {@link #LOADED_ONLY},
-	 *            {@link #CONCURRENT_MODIFICATION}.
-	 * @throws IOException
-	 */
-	public abstract void accept(TreeVisitor tv, int flags) throws IOException;
 
 	/**
 	 * @return mode (type of object)

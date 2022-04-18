@@ -43,6 +43,14 @@
 
 package org.eclipse.jgit.transport;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.URISyntaxException;
@@ -52,20 +60,27 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.zip.Deflater;
 
+import org.eclipse.jgit.errors.MissingObjectException;
+import org.eclipse.jgit.errors.UnpackException;
 import org.eclipse.jgit.junit.LocalDiskRepositoryTestCase;
 import org.eclipse.jgit.junit.TestRepository;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.NullProgressMonitor;
-import org.eclipse.jgit.lib.ObjectDirectory;
 import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.ObjectLoader;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevBlob;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevTree;
+import org.eclipse.jgit.storage.file.ObjectDirectory;
+import org.eclipse.jgit.storage.pack.BinaryDelta;
 import org.eclipse.jgit.util.NB;
 import org.eclipse.jgit.util.TemporaryBuffer;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
 
 public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 	private static final NullProgressMonitor PM = NullProgressMonitor.INSTANCE;
@@ -83,7 +98,8 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 	private RevBlob a, b;
 
 	@Override
-	protected void setUp() throws Exception {
+	@Before
+	public void setUp() throws Exception {
 		super.setUp();
 
 		src = createBareRepository();
@@ -102,7 +118,7 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 		Transport t = Transport.open(src, uriOf(dst));
 		try {
 			t.fetch(PM, Collections.singleton(new RefSpec("+refs/*:refs/*")));
-			assertEquals(B.copy(), src.resolve(R_MASTER));
+			assertEquals(B, src.resolve(R_MASTER));
 		} finally {
 			t.close();
 		}
@@ -115,7 +131,8 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 	}
 
 	@Override
-	protected void tearDown() throws Exception {
+	@After
+	public void tearDown() throws Exception {
 		if (src != null)
 			src.close();
 		if (dst != null)
@@ -123,9 +140,10 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 		super.tearDown();
 	}
 
+	@Test
 	public void testFilterHidesPrivate() throws Exception {
 		Map<String, Ref> refs;
-		TransportLocal t = new TransportLocal(src, uriOf(dst)) {
+		TransportLocal t = new TransportLocal(src, uriOf(dst), dst.getDirectory()) {
 			@Override
 			ReceivePack createReceivePack(final Repository db) {
 				db.close();
@@ -154,9 +172,10 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 
 		Ref master = refs.get(R_MASTER);
 		assertNotNull("has master", master);
-		assertEquals(B.copy(), master.getObjectId());
+		assertEquals(B, master.getObjectId());
 	}
 
+	@Test
 	public void testSuccess() throws Exception {
 		// Manually force a delta of an object so we reuse it later.
 		//
@@ -176,7 +195,7 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 		// Verify the only storage of b is our packed delta above.
 		//
 		ObjectDirectory od = (ObjectDirectory) src.getObjectDatabase();
-		assertTrue("has b", od.hasObject(b));
+		assertTrue("has b", src.hasObject(b));
 		assertFalse("b not loose", od.fileFor(b).exists());
 
 		// Now use b but in a different commit than what is hidden.
@@ -187,7 +206,7 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 
 		// Push this new content to the remote, doing strict validation.
 		//
-		TransportLocal t = new TransportLocal(src, uriOf(dst)) {
+		TransportLocal t = new TransportLocal(src, uriOf(dst), dst.getDirectory()) {
 			@Override
 			ReceivePack createReceivePack(final Repository db) {
 				db.close();
@@ -219,9 +238,10 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 		assertNotNull("have result", r);
 		assertNull("private not advertised", r.getAdvertisedRef(R_PRIVATE));
 		assertSame("master updated", RemoteRefUpdate.Status.OK, u.getStatus());
-		assertEquals(N.copy(), dst.resolve(R_MASTER));
+		assertEquals(N, dst.resolve(R_MASTER));
 	}
 
+	@Test
 	public void testCreateBranchAtHiddenCommitFails() throws Exception {
 		final TemporaryBuffer.Heap pack = new TemporaryBuffer.Heap(64);
 		packHeader(pack, 0);
@@ -240,7 +260,15 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 		rp.setCheckReceivedObjects(true);
 		rp.setCheckReferencedObjectsAreReachable(true);
 		rp.setRefFilter(new HidePrivateFilter());
-		rp.receive(new ByteArrayInputStream(inBuf.toByteArray()), outBuf, null);
+		try {
+			receive(rp, inBuf, outBuf);
+			fail("Expected UnpackException");
+		} catch (UnpackException failed) {
+			Throwable err = failed.getCause();
+			assertTrue(err instanceof MissingObjectException);
+			MissingObjectException moe = (MissingObjectException) err;
+			assertEquals(P, moe.getObjectId());
+		}
 
 		final PacketLineIn r = asPacketLineIn(outBuf);
 		String master = r.readString();
@@ -254,56 +282,30 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 		assertSame(PacketLineIn.END, r.readString());
 	}
 
-	public void testUsingHiddenDeltaBaseFails() throws Exception {
-		final TemporaryBuffer.Heap pack = new TemporaryBuffer.Heap(64);
-		packHeader(pack, 1);
-		pack.write((Constants.OBJ_REF_DELTA) << 4 | 4);
-		b.copyRawTo(pack);
-		deflate(pack, new byte[] { 0x1, 0x1, 0x1, 'b' });
-		digest(pack);
-
-		final TemporaryBuffer.Heap inBuf = new TemporaryBuffer.Heap(256);
-		final PacketLineOut inPckLine = new PacketLineOut(inBuf);
-		inPckLine.writeString(ObjectId.zeroId().name() + ' ' + P.name() + ' '
-				+ "refs/heads/s" + '\0'
-				+ BasePackPushConnection.CAPABILITY_REPORT_STATUS);
-		inPckLine.end();
-		pack.writeTo(inBuf, PM);
-
-		final TemporaryBuffer.Heap outBuf = new TemporaryBuffer.Heap(1024);
-		final ReceivePack rp = new ReceivePack(dst);
-		rp.setCheckReceivedObjects(true);
-		rp.setCheckReferencedObjectsAreReachable(true);
-		rp.setRefFilter(new HidePrivateFilter());
+	private void receive(final ReceivePack rp,
+			final TemporaryBuffer.Heap inBuf, final TemporaryBuffer.Heap outBuf)
+			throws IOException {
 		rp.receive(new ByteArrayInputStream(inBuf.toByteArray()), outBuf, null);
-
-		final PacketLineIn r = asPacketLineIn(outBuf);
-		String master = r.readString();
-		int nul = master.indexOf('\0');
-		assertTrue("has capability list", nul > 0);
-		assertEquals(B.name() + ' ' + R_MASTER, master.substring(0, nul));
-		assertSame(PacketLineIn.END, r.readString());
-
-		assertEquals("unpack error Missing blob " + b.name(), r.readString());
-		assertEquals("ng refs/heads/s n/a (unpacker error)", r.readString());
-		assertSame(PacketLineIn.END, r.readString());
 	}
 
-	public void testUsingHiddenCommonBlobFails() throws Exception {
-		// Try to use the 'b' blob that is hidden.
-		//
-		TestRepository s = new TestRepository(src);
-		RevCommit N = s.commit().parent(B).add("q", s.blob("b")).create();
+	@Test
+	public void testUsingHiddenDeltaBaseFails() throws Exception {
+		byte[] delta = { 0x1, 0x1, 0x1, 'c' };
+		TestRepository<Repository> s = new TestRepository<Repository>(src);
+		RevCommit N = s.commit().parent(B).add("q",
+				s.blob(BinaryDelta.apply(dst.open(b).getCachedBytes(), delta)))
+				.create();
 
-		// But don't include it in the pack.
-		//
-		final TemporaryBuffer.Heap pack = new TemporaryBuffer.Heap(64);
-		packHeader(pack, 2);
-		copy(pack, src.openObject(N));
-		copy(pack,src.openObject(s.parseBody(N).getTree()));
+		final TemporaryBuffer.Heap pack = new TemporaryBuffer.Heap(1024);
+		packHeader(pack, 3);
+		copy(pack, src.open(N));
+		copy(pack, src.open(s.parseBody(N).getTree()));
+		pack.write((Constants.OBJ_REF_DELTA) << 4 | 4);
+		b.copyRawTo(pack);
+		deflate(pack, delta);
 		digest(pack);
 
-		final TemporaryBuffer.Heap inBuf = new TemporaryBuffer.Heap(256);
+		final TemporaryBuffer.Heap inBuf = new TemporaryBuffer.Heap(1024);
 		final PacketLineOut inPckLine = new PacketLineOut(inBuf);
 		inPckLine.writeString(ObjectId.zeroId().name() + ' ' + N.name() + ' '
 				+ "refs/heads/s" + '\0'
@@ -316,7 +318,15 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 		rp.setCheckReceivedObjects(true);
 		rp.setCheckReferencedObjectsAreReachable(true);
 		rp.setRefFilter(new HidePrivateFilter());
-		rp.receive(new ByteArrayInputStream(inBuf.toByteArray()), outBuf, null);
+		try {
+			receive(rp, inBuf, outBuf);
+			fail("Expected UnpackException");
+		} catch (UnpackException failed) {
+			Throwable err = failed.getCause();
+			assertTrue(err instanceof MissingObjectException);
+			MissingObjectException moe = (MissingObjectException) err;
+			assertEquals(b, moe.getObjectId());
+		}
 
 		final PacketLineIn r = asPacketLineIn(outBuf);
 		String master = r.readString();
@@ -330,22 +340,73 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 		assertSame(PacketLineIn.END, r.readString());
 	}
 
+	@Test
+	public void testUsingHiddenCommonBlobFails() throws Exception {
+		// Try to use the 'b' blob that is hidden.
+		//
+		TestRepository<Repository> s = new TestRepository<Repository>(src);
+		RevCommit N = s.commit().parent(B).add("q", s.blob("b")).create();
+
+		// But don't include it in the pack.
+		//
+		final TemporaryBuffer.Heap pack = new TemporaryBuffer.Heap(1024);
+		packHeader(pack, 2);
+		copy(pack, src.open(N));
+		copy(pack,src.open(s.parseBody(N).getTree()));
+		digest(pack);
+
+		final TemporaryBuffer.Heap inBuf = new TemporaryBuffer.Heap(1024);
+		final PacketLineOut inPckLine = new PacketLineOut(inBuf);
+		inPckLine.writeString(ObjectId.zeroId().name() + ' ' + N.name() + ' '
+				+ "refs/heads/s" + '\0'
+				+ BasePackPushConnection.CAPABILITY_REPORT_STATUS);
+		inPckLine.end();
+		pack.writeTo(inBuf, PM);
+
+		final TemporaryBuffer.Heap outBuf = new TemporaryBuffer.Heap(1024);
+		final ReceivePack rp = new ReceivePack(dst);
+		rp.setCheckReceivedObjects(true);
+		rp.setCheckReferencedObjectsAreReachable(true);
+		rp.setRefFilter(new HidePrivateFilter());
+		try {
+			receive(rp, inBuf, outBuf);
+			fail("Expected UnpackException");
+		} catch (UnpackException failed) {
+			Throwable err = failed.getCause();
+			assertTrue(err instanceof MissingObjectException);
+			MissingObjectException moe = (MissingObjectException) err;
+			assertEquals(b, moe.getObjectId());
+		}
+
+		final PacketLineIn r = asPacketLineIn(outBuf);
+		String master = r.readString();
+		int nul = master.indexOf('\0');
+		assertTrue("has capability list", nul > 0);
+		assertEquals(B.name() + ' ' + R_MASTER, master.substring(0, nul));
+		assertSame(PacketLineIn.END, r.readString());
+
+		assertEquals("unpack error Missing blob " + b.name(), r.readString());
+		assertEquals("ng refs/heads/s n/a (unpacker error)", r.readString());
+		assertSame(PacketLineIn.END, r.readString());
+	}
+
+	@Test
 	public void testUsingUnknownBlobFails() throws Exception {
 		// Try to use the 'n' blob that is not on the server.
 		//
-		TestRepository s = new TestRepository(src);
+		TestRepository<Repository> s = new TestRepository<Repository>(src);
 		RevBlob n = s.blob("n");
 		RevCommit N = s.commit().parent(B).add("q", n).create();
 
 		// But don't include it in the pack.
 		//
-		final TemporaryBuffer.Heap pack = new TemporaryBuffer.Heap(64);
+		final TemporaryBuffer.Heap pack = new TemporaryBuffer.Heap(1024);
 		packHeader(pack, 2);
-		copy(pack, src.openObject(N));
-		copy(pack,src.openObject(s.parseBody(N).getTree()));
+		copy(pack, src.open(N));
+		copy(pack,src.open(s.parseBody(N).getTree()));
 		digest(pack);
 
-		final TemporaryBuffer.Heap inBuf = new TemporaryBuffer.Heap(256);
+		final TemporaryBuffer.Heap inBuf = new TemporaryBuffer.Heap(1024);
 		final PacketLineOut inPckLine = new PacketLineOut(inBuf);
 		inPckLine.writeString(ObjectId.zeroId().name() + ' ' + N.name() + ' '
 				+ "refs/heads/s" + '\0'
@@ -358,7 +419,15 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 		rp.setCheckReceivedObjects(true);
 		rp.setCheckReferencedObjectsAreReachable(true);
 		rp.setRefFilter(new HidePrivateFilter());
-		rp.receive(new ByteArrayInputStream(inBuf.toByteArray()), outBuf, null);
+		try {
+			receive(rp, inBuf, outBuf);
+			fail("Expected UnpackException");
+		} catch (UnpackException failed) {
+			Throwable err = failed.getCause();
+			assertTrue(err instanceof MissingObjectException);
+			MissingObjectException moe = (MissingObjectException) err;
+			assertEquals(n, moe.getObjectId());
+		}
 
 		final PacketLineIn r = asPacketLineIn(outBuf);
 		String master = r.readString();
@@ -372,19 +441,20 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 		assertSame(PacketLineIn.END, r.readString());
 	}
 
+	@Test
 	public void testUsingUnknownTreeFails() throws Exception {
-		TestRepository s = new TestRepository(src);
+		TestRepository<Repository> s = new TestRepository<Repository>(src);
 		RevCommit N = s.commit().parent(B).add("q", s.blob("a")).create();
 		RevTree t = s.parseBody(N).getTree();
 
 		// Don't include the tree in the pack.
 		//
-		final TemporaryBuffer.Heap pack = new TemporaryBuffer.Heap(64);
+		final TemporaryBuffer.Heap pack = new TemporaryBuffer.Heap(1024);
 		packHeader(pack, 1);
-		copy(pack, src.openObject(N));
+		copy(pack, src.open(N));
 		digest(pack);
 
-		final TemporaryBuffer.Heap inBuf = new TemporaryBuffer.Heap(256);
+		final TemporaryBuffer.Heap inBuf = new TemporaryBuffer.Heap(1024);
 		final PacketLineOut inPckLine = new PacketLineOut(inBuf);
 		inPckLine.writeString(ObjectId.zeroId().name() + ' ' + N.name() + ' '
 				+ "refs/heads/s" + '\0'
@@ -397,7 +467,15 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 		rp.setCheckReceivedObjects(true);
 		rp.setCheckReferencedObjectsAreReachable(true);
 		rp.setRefFilter(new HidePrivateFilter());
-		rp.receive(new ByteArrayInputStream(inBuf.toByteArray()), outBuf, null);
+		try {
+			receive(rp, inBuf, outBuf);
+			fail("Expected UnpackException");
+		} catch (UnpackException failed) {
+			Throwable err = failed.getCause();
+			assertTrue(err instanceof MissingObjectException);
+			MissingObjectException moe = (MissingObjectException) err;
+			assertEquals(t, moe.getObjectId());
+		}
 
 		final PacketLineIn r = asPacketLineIn(outBuf);
 		String master = r.readString();
@@ -459,12 +537,22 @@ public class ReceivePackRefFilterTest extends LocalDiskRepositoryTestCase {
 		buf.write(md.digest());
 	}
 
+	private ObjectInserter inserter;
+
+	@After
+	public void release() {
+		if (inserter != null)
+			inserter.release();
+	}
+
 	private void openPack(TemporaryBuffer.Heap buf) throws IOException {
+		if (inserter == null)
+			inserter = src.newObjectInserter();
+
 		final byte[] raw = buf.toByteArray();
-		IndexPack ip = IndexPack.create(src, new ByteArrayInputStream(raw));
-		ip.setFixThin(true);
-		ip.index(PM);
-		ip.renameAndOpenPack();
+		PackParser p = inserter.newPackParser(new ByteArrayInputStream(raw));
+		p.setAllowThin(true);
+		p.parse(PM);
 	}
 
 	private static PacketLineIn asPacketLineIn(TemporaryBuffer.Heap buf)

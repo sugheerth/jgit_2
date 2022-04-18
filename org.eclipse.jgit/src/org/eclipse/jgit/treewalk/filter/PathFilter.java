@@ -90,6 +90,11 @@ public class PathFilter extends TreeFilter {
 		pathRaw = Constants.encode(pathStr);
 	}
 
+	/** @return the path this filter matches. */
+	public String getPath() {
+		return pathStr;
+	}
+
 	@Override
 	public boolean include(final TreeWalk walker) {
 		return walker.isPathPrefix(pathRaw, pathRaw.length) == 0;
@@ -104,11 +109,21 @@ public class PathFilter extends TreeFilter {
 	}
 
 	@Override
-	public TreeFilter clone() {
+	public PathFilter clone() {
 		return this;
 	}
 
 	public String toString() {
 		return "PATH(\"" + pathStr + "\")";
+	}
+
+	/**
+	 * @param walker
+	 *            The walk to check against.
+	 * @return {@code true} if the path length of this filter matches the length
+	 *         of the current path of the supplied TreeWalk.
+	 */
+	public boolean isDone(final TreeWalk walker) {
+		return pathRaw.length == walker.getPathLength();
 	}
 }
